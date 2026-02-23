@@ -186,7 +186,7 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
 
     llm = ChatOpenAI(
         model=model,
@@ -200,11 +200,13 @@ def build_chain(docs, model: str):
     )
 
     prompt = PromptTemplate.from_template(
-        "You are a helpful assistant. Use ONLY the content below to answer the question.\n"
-        "If the answer is not found, say 'This information is not available in the provided source.'\n"
-        "Be concise and factual.\n\n"
-        "Content:\n{context}\n\n"
-        "Question: {question}\n\nAnswer:"
+        "You are a helpful assistant analyzing a dataset.\n"
+    "You are given PARTIAL content retrieved from a larger file.\n"
+    "For specific lookups (titles, directors, descriptions), answer directly.\n"
+    "For counting or aggregate questions (how many, total, list all), clarify that "
+    "you can only see a portion of the data and the answer may be incomplete.\n\n"
+    "Content:\n{context}\n\n"
+    "Question: {question}\n\nAnswer:"
     )
 
     chain = (
