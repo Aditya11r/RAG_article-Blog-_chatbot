@@ -230,7 +230,6 @@ with st.sidebar:
             "arcee-ai/trinity-large-preview:free",
             "deepseek/deepseek-r1-0528:free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
-            "openai/gpt-oss-120b:free",
             "meta-llama/llama-3.3-70b-instruct:free",
         ],
         index=0,
