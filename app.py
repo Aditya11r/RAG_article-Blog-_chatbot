@@ -3,12 +3,10 @@ import io
 import tempfile
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -50,19 +48,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
     margin-bottom: 0.3rem;
 }
 .app-header p { color: #64748b; font-size: 0.95rem; font-weight: 300; }
-
-/* Source type tabs */
-.source-tab {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 14px; border-radius: 20px; font-size: 0.82rem;
-    font-weight: 600; cursor: pointer; border: 1px solid #1e2535;
-    background: #131720; color: #64748b; margin: 2px;
-    transition: all 0.2s;
-}
-.source-tab.active {
-    background: linear-gradient(135deg, #38bdf8, #6366f1);
-    color: white; border-color: transparent;
-}
 
 .doc-card {
     background: #131720; border: 1px solid #1e2535;
@@ -111,62 +96,49 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
 }
 .stButton > button:hover { opacity: 0.85 !important; }
 
-.stRadio > div { flex-direction: row !important; gap: 8px; }
-.stRadio label { color: #94a3b8 !important; }
-
 hr { border-color: #1e2535 !important; }
 .chat-container {
     max-height: 60vh; overflow-y: auto; padding: 0.5rem 0.2rem;
     scrollbar-width: thin; scrollbar-color: #1e2535 transparent;
 }
-
-/* File uploader */
 [data-testid="stFileUploader"] {
-    background: #131720; border: 1px dashed #1e2535;
-    border-radius: 10px; padding: 0.5rem;
+    background: #131720; border: 1px dashed #1e2535; border-radius: 10px; padding: 0.5rem;
 }
-
-.empty-state {
-    text-align: center; margin-top: 4rem; color: #334155;
-}
+.empty-state { text-align: center; margin-top: 4rem; color: #334155; }
 .empty-state .icon { font-size: 4rem; margin-bottom: 1rem; }
 .empty-state h3 { font-size: 1.1rem; font-weight: 600; color: #475569; margin-bottom: 0.5rem; }
-.empty-state p { font-size: 0.88rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 #  Session state
 # ─────────────────────────────────────────────
-for key, default in [
-    ("messages", []),
-    ("chain", None),
-    ("loaded_sources", []),
-]:
+for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 # ─────────────────────────────────────────────
-#  Embeddings (cached)
+#  Embeddings — text-embedding-3-small via OpenRouter
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
-    return HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
+    return OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        openai_api_key=OPENROUTER_API_KEY,
+        openai_api_base="https://openrouter.ai/api/v1",
     )
 
 # ─────────────────────────────────────────────
 #  Document loaders
 # ─────────────────────────────────────────────
-def load_from_url(url: str) -> tuple[list[Document], str]:
+def load_from_url(url: str):
     loader = WebBaseLoader(url)
     loader.requests_kwargs = {"timeout": 15}
     docs = loader.load()
     title = docs[0].metadata.get("title", url) if docs else url
     return docs, title
 
-def load_from_pdf(uploaded_file) -> tuple[list[Document], str]:
+def load_from_pdf(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         tmp_path = tmp.name
@@ -175,21 +147,28 @@ def load_from_pdf(uploaded_file) -> tuple[list[Document], str]:
     os.unlink(tmp_path)
     return docs, uploaded_file.name
 
-def load_from_txt(uploaded_file) -> tuple[list[Document], str]:
+def load_from_txt(uploaded_file):
     text = uploaded_file.read().decode("utf-8", errors="ignore")
     docs = [Document(page_content=text, metadata={"source": uploaded_file.name})]
     return docs, uploaded_file.name
 
-def load_from_csv(uploaded_file) -> tuple[list[Document], str]:
+def load_from_csv(uploaded_file, batch_size=3):
     import csv
-    content = uploaded_file.read().decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(content))
+    raw = uploaded_file.read().decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(raw))
     rows = list(reader)
-    # Convert each row to a readable string chunk
     docs = []
-    for i, row in enumerate(rows):
-        text = "\n".join(f"{k}: {v}" for k, v in row.items())
-        docs.append(Document(page_content=text, metadata={"source": uploaded_file.name, "row": i}))
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i: i + batch_size]
+        lines = []
+        for row in batch:
+            row_text = ", ".join(f"{k}: {v}" for k, v in row.items() if v.strip())
+            lines.append(row_text)
+        text = chr(10).join(lines)
+        docs.append(Document(
+            page_content=text,
+            metadata={"source": uploaded_file.name, "rows": f"{i}-{i+len(batch)-1}"}
+        ))
     return docs, uploaded_file.name
 
 # ─────────────────────────────────────────────
@@ -198,7 +177,7 @@ def load_from_csv(uploaded_file) -> tuple[list[Document], str]:
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-def build_chain(docs: list[Document], model: str):
+def build_chain(docs, model: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
         separators=["\n\n", "\n", ". ", " ", ""],
@@ -222,11 +201,10 @@ def build_chain(docs: list[Document], model: str):
 
     prompt = PromptTemplate.from_template(
         "You are a helpful assistant. Use ONLY the content below to answer the question.\n"
-        "If the answer is not found in the content, say 'This information is not available in the provided source.'\n"
+        "If the answer is not found, say 'This information is not available in the provided source.'\n"
         "Be concise and factual.\n\n"
         "Content:\n{context}\n\n"
-        "Question: {question}\n\n"
-        "Answer:"
+        "Question: {question}\n\nAnswer:"
     )
 
     chain = (
@@ -256,6 +234,11 @@ with st.sidebar:
         index=0,
     )
 
+    st.markdown(
+        "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings: text-embedding-3-small</p>",
+        unsafe_allow_html=True,
+    )
+
     st.markdown("---")
     st.markdown("### 📂 Add Source")
 
@@ -265,82 +248,74 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    # --- Website ---
+    # Website
     if source_type == "🌐 Website":
         url_input = st.text_input("URL", placeholder="https://example.com/article", label_visibility="collapsed")
         if st.button("📥 Load URL", use_container_width=True):
             if not url_input.strip():
                 st.sidebar.error("Please enter a URL.")
             else:
-                with st.spinner("Fetching..."):
+                with st.spinner("Fetching & embedding..."):
                     try:
                         docs, title = load_from_url(url_input.strip())
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
-                        st.session_state.loaded_sources = [{
-                            "icon": "🌐", "name": title, "detail": url_input.strip(), "chunks": n_chunks
-                        }]
+                        st.session_state.loaded_sources = [{"icon": "🌐", "name": title, "detail": url_input.strip(), "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # --- PDF ---
+    # PDF
     elif source_type == "📄 PDF":
         pdf_file = st.file_uploader("Upload PDF", type=["pdf"], label_visibility="collapsed")
         if st.button("📥 Load PDF", use_container_width=True):
             if not pdf_file:
                 st.sidebar.error("Please upload a PDF file.")
             else:
-                with st.spinner("Parsing PDF..."):
+                with st.spinner("Parsing & embedding..."):
                     try:
                         docs, title = load_from_pdf(pdf_file)
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
-                        st.session_state.loaded_sources = [{
-                            "icon": "📄", "name": title, "detail": f"{len(docs)} pages", "chunks": n_chunks
-                        }]
+                        st.session_state.loaded_sources = [{"icon": "📄", "name": title, "detail": f"{len(docs)} pages", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # --- Text File ---
+    # Text File
     elif source_type == "📝 Text File":
         txt_file = st.file_uploader("Upload Text File", type=["txt", "md"], label_visibility="collapsed")
         if st.button("📥 Load File", use_container_width=True):
             if not txt_file:
                 st.sidebar.error("Please upload a text file.")
             else:
-                with st.spinner("Reading file..."):
+                with st.spinner("Reading & embedding..."):
                     try:
                         docs, title = load_from_txt(txt_file)
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
-                        st.session_state.loaded_sources = [{
-                            "icon": "📝", "name": title, "detail": f"{len(docs[0].page_content)} chars", "chunks": n_chunks
-                        }]
+                        st.session_state.loaded_sources = [{"icon": "📝", "name": title, "detail": f"{len(docs[0].page_content)} chars", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # --- CSV ---
+    # CSV
     elif source_type == "📊 CSV":
         csv_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
         if st.button("📥 Load CSV", use_container_width=True):
             if not csv_file:
                 st.sidebar.error("Please upload a CSV file.")
             else:
-                with st.spinner("Parsing CSV..."):
+                with st.spinner("Parsing & embedding..."):
                     try:
                         docs, title = load_from_csv(csv_file)
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
-                        st.session_state.loaded_sources = [{
-                            "icon": "📊", "name": title, "detail": f"{len(docs)} rows", "chunks": n_chunks
-                        }]
+                        st.session_state.loaded_sources = [{"icon": "📊", "name": title, "detail": f"{len(docs)} rows", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
@@ -357,7 +332,6 @@ with st.sidebar:
                 <span class="badge">{src['chunks']} chunks</span>
             </div>
             """, unsafe_allow_html=True)
-
         if st.button("🗑️ Clear & Reset", use_container_width=True):
             st.session_state.messages = []
             st.session_state.chain = None
@@ -371,7 +345,7 @@ with st.sidebar:
     )
 
 # ─────────────────────────────────────────────
-#  Main area
+#  Main chat area
 # ─────────────────────────────────────────────
 st.markdown("""
 <div class="app-header">
@@ -393,17 +367,12 @@ if not st.session_state.chain:
     </div>
     """, unsafe_allow_html=True)
 else:
-    # Chat history
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
     for msg in st.session_state.messages:
         if msg["role"] == "user":
-            st.markdown(f"""
-            <div class="chat-user"><div class="bubble">{msg["content"]}</div></div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-user"><div class="bubble">{msg["content"]}</div></div>', unsafe_allow_html=True)
         else:
-            st.markdown(f"""
-            <div class="chat-bot"><div class="bubble">{msg["content"]}</div></div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-bot"><div class="bubble">{msg["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
