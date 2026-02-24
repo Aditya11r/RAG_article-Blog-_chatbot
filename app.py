@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -14,14 +15,11 @@ from langchain_core.documents import Document
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 if not OPENROUTER_API_KEY:
     st.error("❌ OPENROUTER_API_KEY not found.")
     st.stop()
-if not OPENAI_API_KEY:
-    st.error("❌ OPENAI_API_KEY not found.")
-    st.stop()
+
 
 
 st.set_page_config(
@@ -117,9 +115,10 @@ for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
-    return OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cuda"},   # change to "cuda" if GPU available
+        encode_kwargs={"normalize_embeddings": True}
     )
 
 def load_from_url(url: str):
