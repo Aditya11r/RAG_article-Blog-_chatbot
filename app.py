@@ -152,7 +152,7 @@ def load_from_txt(uploaded_file):
     docs = [Document(page_content=text, metadata={"source": uploaded_file.name})]
     return docs, uploaded_file.name
 
-def load_from_csv(uploaded_file, batch_size=3):
+def load_from_csv(uploaded_file, batch_size=2):
     import csv
     raw = uploaded_file.read().decode("utf-8", errors="ignore")
     reader = csv.DictReader(io.StringIO(raw))
@@ -186,7 +186,7 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
     llm = ChatOpenAI(
         model=model,
