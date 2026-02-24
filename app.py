@@ -247,9 +247,9 @@ def build_chain(docs, model: str):
     ])
     chain = (
     {
-        "context": history_aware_retriever | format_docs,
-        "question": RunnablePassthrough(),
-        "chat_history": RunnablePassthrough()
+    "context": history_aware_retriever | format_docs,
+    "question": itemgetter("question"),
+    "chat_history": itemgetter("chat_history"),
     }
     | prompt
     | llm
