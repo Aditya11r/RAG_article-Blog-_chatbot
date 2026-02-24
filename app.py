@@ -117,7 +117,7 @@ for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
 def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cuda"},   # change to "cuda" if GPU available
+        model_kwargs={"device": "cpu"},   # change to "cuda" if GPU available
         encode_kwargs={"normalize_embeddings": True}
     )
 
