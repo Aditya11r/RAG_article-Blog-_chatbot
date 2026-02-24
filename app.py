@@ -467,4 +467,4 @@ else:
                     {"role": "assistant", "content": f"⚠️ Error: {e}"}
                 )
 
-    st.rerun()
+        st.rerun()
