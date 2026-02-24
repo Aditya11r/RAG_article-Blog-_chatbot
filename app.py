@@ -9,7 +9,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
-from langchain.chains import create_history_aware_retriever
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 prompt = ChatPromptTemplate.from_messages([
@@ -197,7 +196,7 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k":7})
 
 
     llm = ChatOpenAI(
@@ -212,6 +211,7 @@ def build_chain(docs, model: str):
     )
 
     # Question rewriting prompt
+    # Rewrite question using history
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
     ("system",
      "Given a chat history and the latest user question "
@@ -223,15 +223,17 @@ def build_chain(docs, model: str):
     ("human", "{question}")
     ])
 
-# Create history-aware retriever
-    retriever = create_history_aware_retriever(
-    llm,
-    base_retriever,
-    contextualize_q_prompt
+    question_rewriter = contextualize_q_prompt | llm | StrOutputParser()
+
+# Proper history-aware retriever
+    history_aware_retriever = (
+    {
+        "question": RunnablePassthrough(),
+        "chat_history": RunnablePassthrough(),
+    }
+    | question_rewriter
+    | base_retriever
     )
-
-    
-
     prompt = ChatPromptTemplate.from_messages([
     ("system",
      "You are an expert assistant with deep knowledge of movies and TV shows.\n"
@@ -247,14 +249,14 @@ def build_chain(docs, model: str):
     ])
     chain = (
     {
-        "context": retriever | format_docs,
+        "context": history_aware_retriever | format_docs,
         "question": RunnablePassthrough(),
-        "chat_history": RunnablePassthrough()   # ✅ ADD THIS
+        "chat_history": RunnablePassthrough()
     }
     | prompt
     | llm
     | StrOutputParser()
-    )   
+    )
     return chain, len(chunks)
 
 # ─────────────────────────────────────────────
