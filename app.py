@@ -223,13 +223,13 @@ with st.sidebar:
             "arcee-ai/trinity-large-preview:free",
             "deepseek/deepseek-r1-0528:free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
+            
         ],
         index=0,
     )
 
     st.markdown(
-        "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings: text-embedding-3-small</p>",
+        "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings:free: all-MiniLM-L6-v2</p>",
         unsafe_allow_html=True,
     )
 
