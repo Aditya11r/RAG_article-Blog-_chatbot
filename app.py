@@ -14,8 +14,13 @@ from langchain_core.documents import Document
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 if not OPENROUTER_API_KEY:
-    st.error("❌ OPENROUTER_API_KEY not found. Please add it to your .env file.")
+    st.error("❌ OPENROUTER_API_KEY not found.")
+    st.stop()
+if not OPENAI_API_KEY:
+    st.error("❌ OPENAI_API_KEY not found.")
     st.stop()
 
 
@@ -114,8 +119,7 @@ for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
 def get_embeddings():
     return OpenAIEmbeddings(
         model="text-embedding-3-small",
-        openai_api_key=OPENROUTER_API_KEY,
-        openai_api_base="https://openrouter.ai/api/v1",
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
     )
 
 def load_from_url(url: str):
