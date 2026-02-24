@@ -223,6 +223,7 @@ with st.sidebar:
             "arcee-ai/trinity-large-preview:free",
             "deepseek/deepseek-r1-0528:free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
+            "openai/gpt-4o-mini"
             
         ],
         index=0,
