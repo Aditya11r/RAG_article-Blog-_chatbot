@@ -18,18 +18,14 @@ if not OPENROUTER_API_KEY:
     st.error("❌ OPENROUTER_API_KEY not found. Please add it to your .env file.")
     st.stop()
 
-# ─────────────────────────────────────────────
-#  Page config
-# ─────────────────────────────────────────────
+
 st.set_page_config(
     page_title="Multi-Source RAG Chatbot",
     page_icon="🤖",
     layout="wide",
 )
 
-# ─────────────────────────────────────────────
-#  CSS
-# ─────────────────────────────────────────────
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -110,16 +106,10 @@ hr { border-color: #1e2535 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-#  Session state
-# ─────────────────────────────────────────────
 for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ─────────────────────────────────────────────
-#  Embeddings — text-embedding-3-small via OpenRouter
-# ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
     return OpenAIEmbeddings(
@@ -128,9 +118,6 @@ def get_embeddings():
         openai_api_base="https://openrouter.ai/api/v1",
     )
 
-# ─────────────────────────────────────────────
-#  Document loaders
-# ─────────────────────────────────────────────
 def load_from_url(url: str):
     loader = WebBaseLoader(url)
     loader.requests_kwargs = {"timeout": 15}
@@ -186,7 +173,7 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
 
     llm = ChatOpenAI(
         model=model,
