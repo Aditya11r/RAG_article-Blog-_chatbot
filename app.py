@@ -9,6 +9,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
+from langchain.chains import create_history_aware_retriever
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 prompt = ChatPromptTemplate.from_messages([
@@ -196,10 +197,11 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+
 
     llm = ChatOpenAI(
-        model=model,
+        model=model,    
         openai_api_key=OPENROUTER_API_KEY,
         openai_api_base="https://openrouter.ai/api/v1",
         temperature=0.3,
@@ -208,6 +210,27 @@ def build_chain(docs, model: str):
             "X-Title": "Multi-Source RAG",
         },
     )
+
+    # Question rewriting prompt
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "Given a chat history and the latest user question "
+     "which might reference context in the chat history, "
+     "formulate a standalone question that can be understood "
+     "without the chat history. Do NOT answer the question."
+    ),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{question}")
+    ])
+
+# Create history-aware retriever
+    retriever = create_history_aware_retriever(
+    llm,
+    base_retriever,
+    contextualize_q_prompt
+    )
+
+    
 
     prompt = ChatPromptTemplate.from_messages([
     ("system",
@@ -280,6 +303,7 @@ with st.sidebar:
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
+                        st.session_state.chat_history = []
                         st.session_state.loaded_sources = [{"icon": "🌐", "name": title, "detail": url_input.strip(), "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
@@ -298,6 +322,7 @@ with st.sidebar:
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
+                        st.session_state.chat_history = []
                         st.session_state.loaded_sources = [{"icon": "📄", "name": title, "detail": f"{len(docs)} pages", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
@@ -316,6 +341,7 @@ with st.sidebar:
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
+                        st.session_state.chat_history = []
                         st.session_state.loaded_sources = [{"icon": "📝", "name": title, "detail": f"{len(docs[0].page_content)} chars", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
@@ -334,6 +360,7 @@ with st.sidebar:
                         chain, n_chunks = build_chain(docs, model)
                         st.session_state.chain = chain
                         st.session_state.messages = []
+                        st.session_state.chat_history = []
                         st.session_state.loaded_sources = [{"icon": "📊", "name": title, "detail": f"{len(docs)} rows", "chunks": n_chunks}]
                         st.rerun()
                     except Exception as e:
@@ -353,6 +380,7 @@ with st.sidebar:
             """, unsafe_allow_html=True)
         if st.button("🗑️ Clear & Reset", use_container_width=True):
             st.session_state.messages = []
+            st.session_state.chat_history = []
             st.session_state.chain = None
             st.session_state.loaded_sources = []
             st.rerun()
