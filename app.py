@@ -9,6 +9,21 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+     "You are given content retrieved from a Netflix dataset.\n\n"
+     "Rules:\n"
+     "- For recommendations: prioritize titles with compelling descriptions.\n"
+     "- Always explain WHY each title is worth watching in 1 sentence.\n"
+     "- For specific lookups: answer directly and precisely.\n"
+     "- For counting questions: clarify you only see partial data.\n"
+    ),
+    MessagesPlaceholder("chat_history"),   # ✅ ADD THIS
+    ("human", "Content:\n{context}\n\nQuestion: {question}")
+])
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
@@ -109,7 +124,12 @@ hr { border-color: #1e2535 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-for key, default in [("messages", []), ("chain", None), ("loaded_sources", [])]:
+for key, default in [
+    ("messages", []),
+    ("chat_history", []),   # ✅ ADD THIS
+    ("chain", None),
+    ("loaded_sources", [])
+]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -182,32 +202,36 @@ def build_chain(docs, model: str):
         model=model,
         openai_api_key=OPENROUTER_API_KEY,
         openai_api_base="https://openrouter.ai/api/v1",
-        temperature=0.2,
+        temperature=0.3,
         default_headers={
             "HTTP-Referer": "https://multi-rag.local",
             "X-Title": "Multi-Source RAG",
         },
     )
 
-    prompt = PromptTemplate.from_template(
-       "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-    "You are given content retrieved from a Netflix dataset.\n\n"
-    "Rules:\n"
-    "- For recommendations: prioritize titles with compelling, unique descriptions. "
-    "Rank by quality of storytelling potential, not just keyword match. "
-    "Always explain WHY each title is worth watching in 1 sentence.\n"
-    "- For specific lookups (cast, director, description): answer directly and precisely.\n"
-    "- For counting/aggregate questions: clarify you only see partial data.\n\n"
-    "Content:\n{context}\n\n"
-    "Question: {question}\n\nAnswer:"
-    )
-
+    prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+     "You are given content retrieved from a Netflix dataset.\n\n"
+     "Rules:\n"
+     "- For recommendations: prioritize titles with compelling descriptions.\n"
+     "- Always explain WHY each title is worth watching in 1 sentence.\n"
+     "- For specific lookups: answer directly and precisely.\n"
+     "- For counting questions: clarify you only see partial data.\n"
+    ),
+    MessagesPlaceholder("chat_history"),   # ✅ ADD THIS
+    ("human", "Content:\n{context}\n\nQuestion: {question}")
+    ])
     chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    {
+        "context": retriever | format_docs,
+        "question": RunnablePassthrough(),
+        "chat_history": RunnablePassthrough()   # ✅ ADD THIS
+    }
+    | prompt
+    | llm
+    | StrOutputParser()
+    )   
     return chain, len(chunks)
 
 # ─────────────────────────────────────────────
@@ -388,8 +412,20 @@ else:
         st.session_state.messages.append({"role": "user", "content": question})
         with st.spinner("Thinking..."):
             try:
-                answer = st.session_state.chain.invoke(question)
+                answer = st.session_state.chain.invoke({
+                                 "question": question,
+                                 "chat_history": st.session_state.chat_history
+                })
                 st.session_state.messages.append({"role": "assistant", "content": answer})
+                st.session_state.chat_history.append(
+                                ("human", question)
+                )
+                st.session_state.chat_history.append(
+                                ("ai", answer)
+                )
+
+                # Optional: keep last 10 exchanges
+                st.session_state.chat_history = st.session_state.chat_history[-10:]
             except Exception as e:
                 st.session_state.messages.append({"role": "assistant", "content": f"⚠️ Error: {e}"})
         st.rerun()
