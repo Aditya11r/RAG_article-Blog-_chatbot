@@ -200,11 +200,14 @@ def build_chain(docs, model: str):
     )
 
     prompt = PromptTemplate.from_template(
-        "You are a helpful assistant analyzing a dataset.\n"
-    "You are given PARTIAL content retrieved from a larger file.\n"
-    "For specific lookups (titles, directors, descriptions), answer directly.\n"
-    "For counting or aggregate questions (how many, total, list all), clarify that "
-    "you can only see a portion of the data and the answer may be incomplete.\n\n"
+       "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+    "You are given content retrieved from a Netflix dataset.\n\n"
+    "Rules:\n"
+    "- For recommendations: prioritize titles with compelling, unique descriptions. "
+    "Rank by quality of storytelling potential, not just keyword match. "
+    "Always explain WHY each title is worth watching in 1 sentence.\n"
+    "- For specific lookups (cast, director, description): answer directly and precisely.\n"
+    "- For counting/aggregate questions: clarify you only see partial data.\n\n"
     "Content:\n{context}\n\n"
     "Question: {question}\n\nAnswer:"
     )
