@@ -2,10 +2,12 @@ import os
 import io
 import tempfile
 import streamlit as st
+from operator import itemgetter
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
@@ -198,7 +200,6 @@ def build_chain(docs, model: str):
     vectorstore = FAISS.from_documents(chunks, embeddings)
     base_retriever = vectorstore.as_retriever(search_kwargs={"k":7})
 
-
     llm = ChatOpenAI(
         model=model,    
         openai_api_key=OPENROUTER_API_KEY,
@@ -210,8 +211,6 @@ def build_chain(docs, model: str):
         },
     )
 
-    # Question rewriting prompt
-    # Rewrite question using history
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
     ("system",
      "Given a chat history and the latest user question "
@@ -225,11 +224,10 @@ def build_chain(docs, model: str):
 
     question_rewriter = contextualize_q_prompt | llm | StrOutputParser()
 
-# Proper history-aware retriever
     history_aware_retriever = (
     {
-        "question": RunnablePassthrough(),
-        "chat_history": RunnablePassthrough(),
+        "question": itemgetter("question"),
+        "chat_history": itemgetter("chat_history"),
     }
     | question_rewriter
     | base_retriever
@@ -437,25 +435,36 @@ else:
     with col2:
         send = st.button("Send ➤", use_container_width=True)
 
+
     if send and user_input.strip():
         question = user_input.strip()
         st.session_state.messages.append({"role": "user", "content": question})
+
         with st.spinner("Thinking..."):
             try:
                 answer = st.session_state.chain.invoke({
-                                 "question": question,
-                                 "chat_history": st.session_state.chat_history
+                    "question": question,
+                    "chat_history": st.session_state.chat_history
                 })
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-                st.session_state.chat_history.append(
-                                ("human", question)
-                )
-                st.session_state.chat_history.append(
-                                ("ai", answer)
+
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
                 )
 
-                # Optional: keep last 10 exchanges
+                # ✅ Proper BaseMessage history
+                st.session_state.chat_history.append(
+                    HumanMessage(content=question)
+                )
+                st.session_state.chat_history.append(
+                    AIMessage(content=answer)
+                )
+
+                # keep last 10 messages
                 st.session_state.chat_history = st.session_state.chat_history[-10:]
+
             except Exception as e:
-                st.session_state.messages.append({"role": "assistant", "content": f"⚠️ Error: {e}"})
-        st.rerun()
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": f"⚠️ Error: {e}"}
+                )
+
+    st.rerun()
