@@ -6,12 +6,10 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableLambda
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
 load_dotenv()
@@ -156,18 +154,14 @@ def load_from_csv(uploaded_file, batch_size=2):
     docs = []
     for i in range(0, len(rows), batch_size):
         batch = rows[i: i + batch_size]
-        lines = []
-        for row in batch:
-            row_text = ", ".join(f"{k}: {v}" for k, v in row.items() if v.strip())
-            lines.append(row_text)
-        text = chr(10).join(lines)
+        lines = [", ".join(f"{k}: {v}" for k, v in row.items() if v.strip()) for row in batch]
+        text = "\n".join(lines)
         docs.append(Document(
             page_content=text,
             metadata={"source": uploaded_file.name, "rows": f"{i}-{i+len(batch)-1}"}
         ))
     return docs, uploaded_file.name
 
-# ── ✅ format_docs defined at MODULE level (not inside build_chain) ──
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
@@ -181,7 +175,7 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 7})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 7})
 
     llm = ChatOpenAI(
         model=model,
@@ -195,71 +189,47 @@ def build_chain(docs, model: str):
         },
     )
 
-    # Prompt to rewrite question given chat history
-    contextualize_q_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "Given a chat history and the latest user question "
-         "which might reference context in the chat history, "
-         "formulate a standalone question that can be understood "
-         "without the chat history. Do NOT answer the question."
-         ),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{question}")
-    ])
-
-    # Answer prompt
-    answer_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-         "You are given content retrieved from a Netflix dataset.\n\n"
-         "Rules:\n"
-         "- For recommendations: prioritize titles with compelling descriptions.\n"
-         "- Always explain WHY each title is worth watching in 1 sentence.\n"
-         "- For specific lookups: answer directly and precisely.\n"
-         "- For counting questions: clarify you only see partial data.\n"
-         ),
-        MessagesPlaceholder("chat_history"),
-        ("human", "Content:\n{context}\n\nQuestion: {question}")
-    ])
-
-    # ✅ Step 1: Rewrite question using history (bypass pipe to avoid type error)
-    def rewrite_question(inputs: dict) -> str:
-        question = inputs["question"]
-        chat_history = inputs["chat_history"]
-        if not chat_history:
-            return question
-        messages = contextualize_q_prompt.format_messages(
-            chat_history=chat_history,
-            question=question
-        )
-        return llm.invoke(messages).content
-
-    history_aware_retriever = RunnableLambda(rewrite_question) | base_retriever
-
-    # ✅ Step 2: Full chain — manually invoke to avoid MessagesPlaceholder dict bug
+    # ✅ Pure Python function — NO LangChain pipes, NO MessagesPlaceholder,
+    #    NO ChatPromptTemplate anywhere near chat_history.
+    #    Messages are built manually as plain lists of BaseMessage objects.
     def run_chain(inputs: dict) -> str:
-        question = inputs["question"]
-        chat_history = inputs["chat_history"]
+        question: str = inputs["question"]
+        chat_history: list = inputs["chat_history"]  # always a list of BaseMessage
 
-        # Retrieve context
-        context_docs = history_aware_retriever.invoke({
-            "question": question,
-            "chat_history": chat_history
-        })
-        context = format_docs(context_docs)  # ✅ now accessible (module-level)
+        # Step 1: If there's history, rewrite the question as standalone
+        if chat_history:
+            rewrite_msgs = (
+                [SystemMessage(content=(
+                    "Given the chat history and the latest user question, "
+                    "rewrite it as a standalone question. Do NOT answer it."
+                ))]
+                + list(chat_history)
+                + [HumanMessage(content=question)]
+            )
+            question = llm.invoke(rewrite_msgs).content.strip()
 
-        # Build messages manually with correct types
-        messages = answer_prompt.format_messages(
-            chat_history=chat_history,   # list of HumanMessage/AIMessage
-            context=context,
-            question=question
+        # Step 2: Retrieve relevant docs using the (possibly rewritten) question
+        context = format_docs(retriever.invoke(question))
+
+        # Step 3: Build answer messages and call LLM
+        answer_msgs = (
+            [SystemMessage(content=(
+                "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+                "You are given content retrieved from a Netflix dataset.\n\n"
+                "Rules:\n"
+                "- For recommendations: prioritize titles with compelling descriptions.\n"
+                "- Always explain WHY each title is worth watching in 1 sentence.\n"
+                "- For specific lookups: answer directly and precisely.\n"
+                "- For counting questions: clarify you only see partial data.\n"
+            ))]
+            + list(chat_history)
+            + [HumanMessage(content=f"Content:\n{context}\n\nQuestion: {question}")]
         )
 
-        response = llm.invoke(messages)
-        return response.content
+        return llm.invoke(answer_msgs).content
 
-    chain = RunnableLambda(run_chain)
-    return chain, len(chunks)
+    return RunnableLambda(run_chain), len(chunks)
+
 
 # ── Sidebar ──────────────────────────────────
 with st.sidebar:
@@ -440,14 +410,9 @@ else:
                     "chat_history": st.session_state.chat_history
                 })
 
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer}
-                )
-
+                st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.session_state.chat_history.append(HumanMessage(content=question))
                 st.session_state.chat_history.append(AIMessage(content=answer))
-
-                # Keep last 10 messages (5 turns)
                 st.session_state.chat_history = st.session_state.chat_history[-10:]
 
             except Exception as e:
