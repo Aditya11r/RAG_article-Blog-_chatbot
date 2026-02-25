@@ -175,7 +175,7 @@ def call_llm(messages: list, model: str) -> str:
     )
     response = client.chat.completions.create(
         model=model,
-        max_tokens=600,
+        max_tokens=512,
         temperature=0.3,
         messages=messages,
     )
