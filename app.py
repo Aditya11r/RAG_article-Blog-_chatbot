@@ -222,48 +222,61 @@ def build_chain(docs, model: str):
     ])
 
     # ✅ FIX: Use RunnableLambda to safely extract fields before prompt
-    from langchain_core.runnables import RunnableLambda
-
+    
     def rewrite_question(inputs: dict) -> str:
         question = inputs["question"]
         chat_history = inputs["chat_history"]
         if not chat_history:
-            return question  # No history? Skip LLM call entirely
+            return question
         messages = contextualize_q_prompt.format_messages(
-            chat_history=chat_history,
-            question=question
-        )
+        chat_history=chat_history,
+        question=question
+    )
         return llm.invoke(messages).content
 
     history_aware_retriever = (
-        RunnableLambda(rewrite_question)
-        | base_retriever
+    RunnableLambda(rewrite_question)
+    | base_retriever
     )
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-         "You are given content retrieved from a Netflix dataset.\n\n"
-         "Rules:\n"
-         "- For recommendations: prioritize titles with compelling descriptions.\n"
-         "- Always explain WHY each title is worth watching in 1 sentence.\n"
-         "- For specific lookups: answer directly and precisely.\n"
-         "- For counting questions: clarify you only see partial data.\n"
-         ),
-        MessagesPlaceholder("chat_history"),
-        ("human", "Content:\n{context}\n\nQuestion: {question}")
+    ("system",
+     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+     "You are given content retrieved from a Netflix dataset.\n\n"
+     "Rules:\n"
+     "- For recommendations: prioritize titles with compelling descriptions.\n"
+     "- Always explain WHY each title is worth watching in 1 sentence.\n"
+     "- For specific lookups: answer directly and precisely.\n"
+     "- For counting questions: clarify you only see partial data.\n"
+    ),
+    MessagesPlaceholder("chat_history"),
+    ("human", "Content:\n{context}\n\nQuestion: {question}")
     ])
 
-    chain = (
-        {
-            "context": history_aware_retriever | format_docs,
-            "question": itemgetter("question"),
-            "chat_history": itemgetter("chat_history"),
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
+# ✅ FIX: Don't pass the dict directly into the chain.
+# Build a RunnableLambda that manually invokes prompt + llm
+    def run_chain(inputs: dict) -> str:
+        question = inputs["question"]
+        chat_history = inputs["chat_history"]
+    
+    # Get context via retriever
+        context_docs = history_aware_retriever.invoke({
+        "question": question,
+        "chat_history": chat_history
+    })
+        context = format_docs(context_docs)
+    
+    # Build messages manually — no ambiguity
+        messages = prompt.format_messages(
+        chat_history=chat_history,
+        context=context,
+        question=question
     )
+    
+        response = llm.invoke(messages)
+        return response.content
+
+    chain = RunnableLambda(run_chain)
     return chain, len(chunks)
 
 # ─────────────────────────────────────────────
