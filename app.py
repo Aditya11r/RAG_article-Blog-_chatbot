@@ -9,6 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
+from langchain_core.runnables import RunnableLambda
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -186,9 +187,6 @@ def load_from_csv(uploaded_file, batch_size=2):
 # ─────────────────────────────────────────────
 #  Build RAG chain
 # ─────────────────────────────────────────────
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
-
 def build_chain(docs, model: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
@@ -198,10 +196,10 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k":7})
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 7})
 
     llm = ChatOpenAI(
-        model=model,    
+        model=model,
         max_tokens=500,
         openai_api_key=OPENROUTER_API_KEY,
         openai_api_base="https://openrouter.ai/api/v1",
@@ -213,48 +211,58 @@ def build_chain(docs, model: str):
     )
 
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "Given a chat history and the latest user question "
-     "which might reference context in the chat history, "
-     "formulate a standalone question that can be understood "
-     "without the chat history. Do NOT answer the question."
-    ),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{question}")
+        ("system",
+         "Given a chat history and the latest user question "
+         "which might reference context in the chat history, "
+         "formulate a standalone question that can be understood "
+         "without the chat history. Do NOT answer the question."
+         ),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{question}")
     ])
 
-    question_rewriter = contextualize_q_prompt | llm | StrOutputParser()
+    # ✅ FIX: Use RunnableLambda to safely extract fields before prompt
+    from langchain_core.runnables import RunnableLambda
+
+    def rewrite_question(inputs: dict) -> str:
+        question = inputs["question"]
+        chat_history = inputs["chat_history"]
+        if not chat_history:
+            return question  # No history? Skip LLM call entirely
+        messages = contextualize_q_prompt.format_messages(
+            chat_history=chat_history,
+            question=question
+        )
+        return llm.invoke(messages).content
 
     history_aware_retriever = (
-    {
-        "question": itemgetter("question"),
-        "chat_history": itemgetter("chat_history"),
-    }
-    | question_rewriter
-    | base_retriever
+        RunnableLambda(rewrite_question)
+        | base_retriever
     )
+
     prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-     "You are given content retrieved from a Netflix dataset.\n\n"
-     "Rules:\n"
-     "- For recommendations: prioritize titles with compelling descriptions.\n"
-     "- Always explain WHY each title is worth watching in 1 sentence.\n"
-     "- For specific lookups: answer directly and precisely.\n"
-     "- For counting questions: clarify you only see partial data.\n"
-    ),
-    MessagesPlaceholder("chat_history"),   # ✅ ADD THIS
-    ("human", "Content:\n{context}\n\nQuestion: {question}")
+        ("system",
+         "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+         "You are given content retrieved from a Netflix dataset.\n\n"
+         "Rules:\n"
+         "- For recommendations: prioritize titles with compelling descriptions.\n"
+         "- Always explain WHY each title is worth watching in 1 sentence.\n"
+         "- For specific lookups: answer directly and precisely.\n"
+         "- For counting questions: clarify you only see partial data.\n"
+         ),
+        MessagesPlaceholder("chat_history"),
+        ("human", "Content:\n{context}\n\nQuestion: {question}")
     ])
+
     chain = (
-    {
-    "context": history_aware_retriever | format_docs,
-    "question": itemgetter("question"),
-    "chat_history": itemgetter("chat_history"),
-    }
-    | prompt
-    | llm
-    | StrOutputParser()
+        {
+            "context": history_aware_retriever | format_docs,
+            "question": itemgetter("question"),
+            "chat_history": itemgetter("chat_history"),
+        }
+        | prompt
+        | llm
+        | StrOutputParser()
     )
     return chain, len(chunks)
 
