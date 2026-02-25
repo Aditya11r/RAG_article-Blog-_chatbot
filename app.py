@@ -2,12 +2,12 @@ import os
 import io
 import tempfile
 import streamlit as st
+import openai
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
@@ -108,7 +108,7 @@ hr { border-color: #1e2535 !important; }
 for key, default in [
     ("messages", []),
     ("chat_history", []),
-    ("chain", None),       # will store a plain Python callable
+    ("chain", None),
     ("loaded_sources", [])
 ]:
     if key not in st.session_state:
@@ -122,6 +122,38 @@ def get_embeddings():
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
+
+# ── Raw OpenAI client — bypasses ALL LangChain validation ──
+def call_llm(messages: list, model: str) -> str:
+    """
+    Convert LangChain message objects to plain dicts and call
+    OpenRouter directly via the openai SDK. Zero LangChain
+    pipeline code runs here, so chat_history validation cannot fire.
+    """
+    client = openai.OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "https://multi-rag.local",
+            "X-Title": "Multi-Source RAG",
+        }
+    )
+    converted = []
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            converted.append({"role": "system", "content": m.content})
+        elif isinstance(m, HumanMessage):
+            converted.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            converted.append({"role": "assistant", "content": m.content})
+
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=500,
+        temperature=0.3,
+        messages=converted,
+    )
+    return response.choices[0].message.content
 
 # ── Loaders ──────────────────────────────────
 def load_from_url(url: str):
@@ -165,8 +197,6 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 # ── Build RAG chain ──────────────────────────
-# Returns a PLAIN PYTHON FUNCTION — no RunnableLambda, no LangChain wrappers.
-# This means zero internal LangChain schema validation on our inputs.
 def build_chain(docs, model: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
@@ -177,25 +207,14 @@ def build_chain(docs, model: str):
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
 
-    # Use similarity_search directly — avoids retriever.invoke() LangChain pipeline
+    # Direct FAISS call — no LangChain retriever pipeline
     def retrieve(query: str):
         return vectorstore.similarity_search(query, k=7)
 
-    llm = ChatOpenAI(
-        model=model,
-        max_tokens=500,
-        openai_api_key=OPENROUTER_API_KEY,
-        openai_api_base="https://openrouter.ai/api/v1",
-        temperature=0.3,
-        default_headers={
-            "HTTP-Referer": "https://multi-rag.local",
-            "X-Title": "Multi-Source RAG",
-        },
-    )
-
-    # ✅ 100% plain Python — no RunnableLambda, no invoke(), no LangChain pipes
+    # Plain Python function — no LangChain wrappers at all
     def run_chain(question: str, chat_history: list) -> str:
-        # Step 1: rewrite question if history exists
+
+        # Step 1: rewrite question if there's history
         if chat_history:
             rewrite_msgs = (
                 [SystemMessage(content=(
@@ -205,12 +224,12 @@ def build_chain(docs, model: str):
                 + list(chat_history)
                 + [HumanMessage(content=question)]
             )
-            question = llm.invoke(rewrite_msgs).content.strip()
+            question = call_llm(rewrite_msgs, model)
 
-        # Step 2: retrieve docs via direct similarity_search (no invoke pipeline)
+        # Step 2: retrieve docs
         context = format_docs(retrieve(question))
 
-        # Step 3: build and call final answer
+        # Step 3: build answer
         answer_msgs = (
             [SystemMessage(content=(
                 "You are an expert assistant with deep knowledge of movies and TV shows.\n"
@@ -224,9 +243,9 @@ def build_chain(docs, model: str):
             + list(chat_history)
             + [HumanMessage(content=f"Content:\n{context}\n\nQuestion: {question}")]
         )
-        return llm.invoke(answer_msgs).content
+        return call_llm(answer_msgs, model)
 
-    return run_chain, len(chunks)   # ✅ plain callable, not RunnableLambda
+    return run_chain, len(chunks)
 
 
 # ── Sidebar ──────────────────────────────────
@@ -403,12 +422,11 @@ else:
 
         with st.spinner("Thinking..."):
             try:
-                # ✅ Call as plain Python function with explicit args — no .invoke(), no dict
+                # Plain Python call — no LangChain invoke, no dict, no validation
                 answer = st.session_state.chain(
                     question,
                     st.session_state.chat_history
                 )
-
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.session_state.chat_history.append(HumanMessage(content=question))
                 st.session_state.chat_history.append(AIMessage(content=answer))
