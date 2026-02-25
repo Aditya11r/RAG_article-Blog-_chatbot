@@ -202,6 +202,7 @@ def build_chain(docs, model: str):
 
     llm = ChatOpenAI(
         model=model,    
+        max_tokens=500,
         openai_api_key=OPENROUTER_API_KEY,
         openai_api_base="https://openrouter.ai/api/v1",
         temperature=0.3,
