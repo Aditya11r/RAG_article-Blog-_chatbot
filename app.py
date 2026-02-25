@@ -2,7 +2,6 @@ import os
 import io
 import tempfile
 import streamlit as st
-from operator import itemgetter
 from dotenv import load_dotenv
 from langchain_community.document_loaders import WebBaseLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,23 +10,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableLambda
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.prompts import PromptTemplate
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-     "You are given content retrieved from a Netflix dataset.\n\n"
-     "Rules:\n"
-     "- For recommendations: prioritize titles with compelling descriptions.\n"
-     "- Always explain WHY each title is worth watching in 1 sentence.\n"
-     "- For specific lookups: answer directly and precisely.\n"
-     "- For counting questions: clarify you only see partial data.\n"
-    ),
-    MessagesPlaceholder("chat_history"),   # ✅ ADD THIS
-    ("human", "Content:\n{context}\n\nQuestion: {question}")
-])
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
@@ -38,14 +21,11 @@ if not OPENROUTER_API_KEY:
     st.error("❌ OPENROUTER_API_KEY not found.")
     st.stop()
 
-
-
 st.set_page_config(
     page_title="Multi-Source RAG Chatbot",
     page_icon="🤖",
     layout="wide",
 )
-
 
 st.markdown("""
 <style>
@@ -127,23 +107,26 @@ hr { border-color: #1e2535 !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Session state ────────────────────────────
 for key, default in [
     ("messages", []),
-    ("chat_history", []),   # ✅ ADD THIS
+    ("chat_history", []),
     ("chain", None),
     ("loaded_sources", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
+# ── Embeddings ───────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},   # change to "cuda" if GPU available
+        model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
 
+# ── Loaders ──────────────────────────────────
 def load_from_url(url: str):
     loader = WebBaseLoader(url)
     loader.requests_kwargs = {"timeout": 15}
@@ -184,9 +167,11 @@ def load_from_csv(uploaded_file, batch_size=2):
         ))
     return docs, uploaded_file.name
 
-# ─────────────────────────────────────────────
-#  Build RAG chain
-# ─────────────────────────────────────────────
+# ── ✅ format_docs defined at MODULE level (not inside build_chain) ──
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# ── Build RAG chain ──────────────────────────
 def build_chain(docs, model: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
@@ -210,6 +195,7 @@ def build_chain(docs, model: str):
         },
     )
 
+    # Prompt to rewrite question given chat history
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
         ("system",
          "Given a chat history and the latest user question "
@@ -221,67 +207,61 @@ def build_chain(docs, model: str):
         ("human", "{question}")
     ])
 
-    # ✅ FIX: Use RunnableLambda to safely extract fields before prompt
-    
+    # Answer prompt
+    answer_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are an expert assistant with deep knowledge of movies and TV shows.\n"
+         "You are given content retrieved from a Netflix dataset.\n\n"
+         "Rules:\n"
+         "- For recommendations: prioritize titles with compelling descriptions.\n"
+         "- Always explain WHY each title is worth watching in 1 sentence.\n"
+         "- For specific lookups: answer directly and precisely.\n"
+         "- For counting questions: clarify you only see partial data.\n"
+         ),
+        MessagesPlaceholder("chat_history"),
+        ("human", "Content:\n{context}\n\nQuestion: {question}")
+    ])
+
+    # ✅ Step 1: Rewrite question using history (bypass pipe to avoid type error)
     def rewrite_question(inputs: dict) -> str:
         question = inputs["question"]
         chat_history = inputs["chat_history"]
         if not chat_history:
             return question
         messages = contextualize_q_prompt.format_messages(
-        chat_history=chat_history,
-        question=question
-    )
+            chat_history=chat_history,
+            question=question
+        )
         return llm.invoke(messages).content
 
-    history_aware_retriever = (
-    RunnableLambda(rewrite_question)
-    | base_retriever
-    )
+    history_aware_retriever = RunnableLambda(rewrite_question) | base_retriever
 
-    prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-     "You are given content retrieved from a Netflix dataset.\n\n"
-     "Rules:\n"
-     "- For recommendations: prioritize titles with compelling descriptions.\n"
-     "- Always explain WHY each title is worth watching in 1 sentence.\n"
-     "- For specific lookups: answer directly and precisely.\n"
-     "- For counting questions: clarify you only see partial data.\n"
-    ),
-    MessagesPlaceholder("chat_history"),
-    ("human", "Content:\n{context}\n\nQuestion: {question}")
-    ])
-
-# ✅ FIX: Don't pass the dict directly into the chain.
-# Build a RunnableLambda that manually invokes prompt + llm
+    # ✅ Step 2: Full chain — manually invoke to avoid MessagesPlaceholder dict bug
     def run_chain(inputs: dict) -> str:
         question = inputs["question"]
         chat_history = inputs["chat_history"]
-    
-    # Get context via retriever
+
+        # Retrieve context
         context_docs = history_aware_retriever.invoke({
-        "question": question,
-        "chat_history": chat_history
-    })
-        context = format_docs(context_docs)
-    
-    # Build messages manually — no ambiguity
-        messages = prompt.format_messages(
-        chat_history=chat_history,
-        context=context,
-        question=question
-    )
-    
+            "question": question,
+            "chat_history": chat_history
+        })
+        context = format_docs(context_docs)  # ✅ now accessible (module-level)
+
+        # Build messages manually with correct types
+        messages = answer_prompt.format_messages(
+            chat_history=chat_history,   # list of HumanMessage/AIMessage
+            context=context,
+            question=question
+        )
+
         response = llm.invoke(messages)
         return response.content
 
     chain = RunnableLambda(run_chain)
     return chain, len(chunks)
 
-# ─────────────────────────────────────────────
-#  Sidebar
-# ─────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
     st.markdown("---")
@@ -293,13 +273,12 @@ with st.sidebar:
             "deepseek/deepseek-r1-0528:free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
             "openai/gpt-4o-mini"
-            
         ],
         index=0,
     )
 
     st.markdown(
-        "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings:free: all-MiniLM-L6-v2</p>",
+        "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings: all-MiniLM-L6-v2</p>",
         unsafe_allow_html=True,
     )
 
@@ -312,7 +291,6 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    # Website
     if source_type == "🌐 Website":
         url_input = st.text_input("URL", placeholder="https://example.com/article", label_visibility="collapsed")
         if st.button("📥 Load URL", use_container_width=True):
@@ -331,7 +309,6 @@ with st.sidebar:
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # PDF
     elif source_type == "📄 PDF":
         pdf_file = st.file_uploader("Upload PDF", type=["pdf"], label_visibility="collapsed")
         if st.button("📥 Load PDF", use_container_width=True):
@@ -350,7 +327,6 @@ with st.sidebar:
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # Text File
     elif source_type == "📝 Text File":
         txt_file = st.file_uploader("Upload Text File", type=["txt", "md"], label_visibility="collapsed")
         if st.button("📥 Load File", use_container_width=True):
@@ -369,7 +345,6 @@ with st.sidebar:
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # CSV
     elif source_type == "📊 CSV":
         csv_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
         if st.button("📥 Load CSV", use_container_width=True):
@@ -388,7 +363,6 @@ with st.sidebar:
                     except Exception as e:
                         st.sidebar.error(f"Error: {e}")
 
-    # Loaded source info
     if st.session_state.loaded_sources:
         st.markdown("---")
         st.markdown("### ✅ Loaded Source")
@@ -413,9 +387,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ─────────────────────────────────────────────
-#  Main chat area
-# ─────────────────────────────────────────────
+# ── Main chat area ───────────────────────────
 st.markdown("""
 <div class="app-header">
     <h1>🤖 Multi-Source RAG Chatbot</h1>
@@ -457,7 +429,6 @@ else:
     with col2:
         send = st.button("Send ➤", use_container_width=True)
 
-
     if send and user_input.strip():
         question = user_input.strip()
         st.session_state.messages.append({"role": "user", "content": question})
@@ -473,15 +444,10 @@ else:
                     {"role": "assistant", "content": answer}
                 )
 
-                # ✅ Proper BaseMessage history
-                st.session_state.chat_history.append(
-                    HumanMessage(content=question)
-                )
-                st.session_state.chat_history.append(
-                    AIMessage(content=answer)
-                )
+                st.session_state.chat_history.append(HumanMessage(content=question))
+                st.session_state.chat_history.append(AIMessage(content=answer))
 
-                # keep last 10 messages
+                # Keep last 10 messages (5 turns)
                 st.session_state.chat_history = st.session_state.chat_history[-10:]
 
             except Exception as e:
