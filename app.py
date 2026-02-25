@@ -584,12 +584,14 @@ def render_app():
             if not st.session_state.session_id:
                 sid = create_session(st.session_state.user_id, src_meta)
                 st.session_state.session_id = sid
+                # Only clear messages for brand new sessions
+                st.session_state.messages       = []
+                st.session_state.chat_history   = []
             else:
+                # Updating existing session - keep the messages
                 update_session_source(st.session_state.session_id, src_meta)
 
             st.session_state.chain          = chain
-            st.session_state.messages       = []
-            st.session_state.chat_history   = []
             st.session_state.loaded_sources = [src_meta]
             st.rerun()
 
