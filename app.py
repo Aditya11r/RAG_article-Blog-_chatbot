@@ -8,7 +8,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.runnables import RunnableLambda
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
@@ -109,7 +108,7 @@ hr { border-color: #1e2535 !important; }
 for key, default in [
     ("messages", []),
     ("chat_history", []),
-    ("chain", None),
+    ("chain", None),       # will store a plain Python callable
     ("loaded_sources", [])
 ]:
     if key not in st.session_state:
@@ -166,6 +165,8 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 # ── Build RAG chain ──────────────────────────
+# Returns a PLAIN PYTHON FUNCTION — no RunnableLambda, no LangChain wrappers.
+# This means zero internal LangChain schema validation on our inputs.
 def build_chain(docs, model: str):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
@@ -175,7 +176,10 @@ def build_chain(docs, model: str):
 
     embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 7})
+
+    # Use similarity_search directly — avoids retriever.invoke() LangChain pipeline
+    def retrieve(query: str):
+        return vectorstore.similarity_search(query, k=7)
 
     llm = ChatOpenAI(
         model=model,
@@ -189,14 +193,9 @@ def build_chain(docs, model: str):
         },
     )
 
-    # ✅ Pure Python function — NO LangChain pipes, NO MessagesPlaceholder,
-    #    NO ChatPromptTemplate anywhere near chat_history.
-    #    Messages are built manually as plain lists of BaseMessage objects.
-    def run_chain(inputs: dict) -> str:
-        question: str = inputs["question"]
-        chat_history: list = inputs["chat_history"]  # always a list of BaseMessage
-
-        # Step 1: If there's history, rewrite the question as standalone
+    # ✅ 100% plain Python — no RunnableLambda, no invoke(), no LangChain pipes
+    def run_chain(question: str, chat_history: list) -> str:
+        # Step 1: rewrite question if history exists
         if chat_history:
             rewrite_msgs = (
                 [SystemMessage(content=(
@@ -208,10 +207,10 @@ def build_chain(docs, model: str):
             )
             question = llm.invoke(rewrite_msgs).content.strip()
 
-        # Step 2: Retrieve relevant docs using the (possibly rewritten) question
-        context = format_docs(retriever.invoke(question))
+        # Step 2: retrieve docs via direct similarity_search (no invoke pipeline)
+        context = format_docs(retrieve(question))
 
-        # Step 3: Build answer messages and call LLM
+        # Step 3: build and call final answer
         answer_msgs = (
             [SystemMessage(content=(
                 "You are an expert assistant with deep knowledge of movies and TV shows.\n"
@@ -225,10 +224,9 @@ def build_chain(docs, model: str):
             + list(chat_history)
             + [HumanMessage(content=f"Content:\n{context}\n\nQuestion: {question}")]
         )
-
         return llm.invoke(answer_msgs).content
 
-    return RunnableLambda(run_chain), len(chunks)
+    return run_chain, len(chunks)   # ✅ plain callable, not RunnableLambda
 
 
 # ── Sidebar ──────────────────────────────────
@@ -405,10 +403,11 @@ else:
 
         with st.spinner("Thinking..."):
             try:
-                answer = st.session_state.chain.invoke({
-                    "question": question,
-                    "chat_history": st.session_state.chat_history
-                })
+                # ✅ Call as plain Python function with explicit args — no .invoke(), no dict
+                answer = st.session_state.chain(
+                    question,
+                    st.session_state.chat_history
+                )
 
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 st.session_state.chat_history.append(HumanMessage(content=question))
