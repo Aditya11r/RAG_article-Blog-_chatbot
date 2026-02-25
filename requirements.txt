@@ -1,12 +1,11 @@
+langchain==1.2.10
+langchain-core==1.2.14
+langchain-community==0.4.1
+langchain-openai==1.1.10
 streamlit
-langchain
-langchain-community
-langchain-openai
-langchain-huggingface
-langchain-text-splitters
+openai
 faiss-cpu
 sentence-transformers
 beautifulsoup4
-requests
 python-dotenv
 pypdf
