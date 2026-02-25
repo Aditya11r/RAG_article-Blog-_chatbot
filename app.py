@@ -107,12 +107,80 @@ hr { border-color: #1e2535 !important; }
 # ── Session state ────────────────────────────
 for key, default in [
     ("messages", []),
-    ("chat_history", []),
+    ("chat_history", []),   # stores dicts: {"role": "user"/"assistant", "content": "..."}
     ("chain", None),
     ("loaded_sources", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+# ─────────────────────────────────────────────────────────────
+#  HISTORY NORMALIZER
+#  Accepts ANY format: dicts, HumanMessage/AIMessage objects,
+#  or a mixed list — always returns plain OpenAI-style dicts.
+# ─────────────────────────────────────────────────────────────
+def normalize_history(history: list) -> list:
+    """
+    Convert chat history to a list of plain dicts:
+      {"role": "user" | "assistant" | "system", "content": "..."}
+
+    Handles:
+      - dict with "role"/"content" keys  (our native format)
+      - LangChain HumanMessage           → role: user
+      - LangChain AIMessage              → role: assistant
+      - LangChain SystemMessage          → role: system
+      - Any object with .content attr    → role: user (fallback)
+    """
+    normalized = []
+    for msg in history:
+        if isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            # map "human" → "user", "ai" → "assistant" just in case
+            if role == "human":
+                role = "user"
+            elif role == "ai":
+                role = "assistant"
+            normalized.append({"role": role, "content": str(content)})
+        elif isinstance(msg, HumanMessage):
+            normalized.append({"role": "user", "content": str(msg.content)})
+        elif isinstance(msg, AIMessage):
+            normalized.append({"role": "assistant", "content": str(msg.content)})
+        elif isinstance(msg, SystemMessage):
+            normalized.append({"role": "system", "content": str(msg.content)})
+        elif hasattr(msg, "content"):
+            normalized.append({"role": "user", "content": str(msg.content)})
+        else:
+            normalized.append({"role": "user", "content": str(msg)})
+    return normalized
+
+
+# ─────────────────────────────────────────────────────────────
+#  RAW LLM CALLER — zero LangChain, zero validation
+# ─────────────────────────────────────────────────────────────
+def call_llm(messages: list, model: str) -> str:
+    """
+    Call OpenRouter directly via the openai SDK.
+    `messages` must already be a list of plain dicts
+    with "role" and "content" keys.
+    """
+    client = openai.OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "https://multi-rag.local",
+            "X-Title":      "Multi-Source RAG",
+        },
+    )
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=600,
+        temperature=0.3,
+        messages=messages,
+    )
+    return response.choices[0].message.content.strip()
+
 
 # ── Embeddings ───────────────────────────────
 @st.cache_resource(show_spinner=False)
@@ -120,40 +188,9 @@ def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
+        encode_kwargs={"normalize_embeddings": True},
     )
 
-# ── Raw OpenAI client — bypasses ALL LangChain validation ──
-def call_llm(messages: list, model: str) -> str:
-    """
-    Convert LangChain message objects to plain dicts and call
-    OpenRouter directly via the openai SDK. Zero LangChain
-    pipeline code runs here, so chat_history validation cannot fire.
-    """
-    client = openai.OpenAI(
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        default_headers={
-            "HTTP-Referer": "https://multi-rag.local",
-            "X-Title": "Multi-Source RAG",
-        }
-    )
-    converted = []
-    for m in messages:
-        if isinstance(m, SystemMessage):
-            converted.append({"role": "system", "content": m.content})
-        elif isinstance(m, HumanMessage):
-            converted.append({"role": "user", "content": m.content})
-        elif isinstance(m, AIMessage):
-            converted.append({"role": "assistant", "content": m.content})
-
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=500,
-        temperature=0.3,
-        messages=converted,
-    )
-    return response.choices[0].message.content
 
 # ── Loaders ──────────────────────────────────
 def load_from_url(url: str):
@@ -167,28 +204,24 @@ def load_from_pdf(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         tmp_path = tmp.name
-    loader = PyPDFLoader(tmp_path)
-    docs = loader.load()
+    docs = PyPDFLoader(tmp_path).load()
     os.unlink(tmp_path)
     return docs, uploaded_file.name
 
 def load_from_txt(uploaded_file):
     text = uploaded_file.read().decode("utf-8", errors="ignore")
-    docs = [Document(page_content=text, metadata={"source": uploaded_file.name})]
-    return docs, uploaded_file.name
+    return [Document(page_content=text, metadata={"source": uploaded_file.name})], uploaded_file.name
 
 def load_from_csv(uploaded_file, batch_size=2):
     import csv
     raw = uploaded_file.read().decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(raw))
-    rows = list(reader)
+    rows = list(csv.DictReader(io.StringIO(raw)))
     docs = []
     for i in range(0, len(rows), batch_size):
         batch = rows[i: i + batch_size]
         lines = [", ".join(f"{k}: {v}" for k, v in row.items() if v.strip()) for row in batch]
-        text = "\n".join(lines)
         docs.append(Document(
-            page_content=text,
+            page_content="\n".join(lines),
             metadata={"source": uploaded_file.name, "rows": f"{i}-{i+len(batch)-1}"}
         ))
     return docs, uploaded_file.name
@@ -196,54 +229,76 @@ def load_from_csv(uploaded_file, batch_size=2):
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-# ── Build RAG chain ──────────────────────────
+
+# ─────────────────────────────────────────────────────────────
+#  BUILD CHAIN
+# ─────────────────────────────────────────────────────────────
 def build_chain(docs, model: str):
-    splitter = RecursiveCharacterTextSplitter(
+    chunks = RecursiveCharacterTextSplitter(
         chunk_size=600, chunk_overlap=120,
         separators=["\n\n", "\n", ". ", " ", ""],
-    )
-    chunks = splitter.split_documents(docs)
+    ).split_documents(docs)
 
-    embeddings = get_embeddings()
-    vectorstore = FAISS.from_documents(chunks, embeddings)
+    vectorstore = FAISS.from_documents(chunks, get_embeddings())
 
-    # Direct FAISS call — no LangChain retriever pipeline
     def retrieve(query: str):
         return vectorstore.similarity_search(query, k=7)
 
-    # Plain Python function — no LangChain wrappers at all
-    def run_chain(question: str, chat_history: list) -> str:
+    # ── SYSTEM PROMPTS ──
+    REWRITE_SYSTEM = (
+        "You are a query rewriter. Given a conversation history and a follow-up question, "
+        "rewrite the follow-up as a fully self-contained standalone question that captures "
+        "all necessary context from the history. Output ONLY the rewritten question, nothing else."
+    )
 
-        # Step 1: rewrite question if there's history
-        if chat_history:
-            rewrite_msgs = (
-                [SystemMessage(content=(
-                    "Given the chat history and the latest user question, "
-                    "rewrite it as a standalone question. Do NOT answer it."
-                ))]
-                + list(chat_history)
-                + [HumanMessage(content=question)]
+    ANSWER_SYSTEM = (
+        "You are an expert assistant with deep knowledge of movies and TV shows. "
+        "You are given content retrieved from a Netflix dataset and the full conversation history.\n\n"
+        "Rules:\n"
+        "- Use the conversation history to maintain full contextual awareness across turns.\n"
+        "- If the user refers to something mentioned earlier (e.g. 'the first one', 'that movie', "
+        "'tell me more'), resolve it using the history.\n"
+        "- For recommendations: prioritize titles with compelling descriptions and explain "
+        "WHY each title is worth watching in 1 sentence.\n"
+        "- For specific lookups: answer directly and precisely.\n"
+        "- For counting questions: clarify you only see partial data.\n"
+        "- Always keep your answer grounded in the retrieved content."
+    )
+
+    # ─────────────────────────────────────────
+    #  run_chain — fully context-aware
+    #  chat_history: list of dicts OR BaseMessages OR mixed
+    # ─────────────────────────────────────────
+    def run_chain(question: str, chat_history) -> str:
+        # 1️⃣ Normalize to plain dicts — handles ANY input format
+        history_dicts = normalize_history(chat_history if chat_history else [])
+
+        # 2️⃣ Rewrite question into standalone if history exists
+        standalone_question = question
+        if history_dicts:
+            rewrite_messages = (
+                [{"role": "system", "content": REWRITE_SYSTEM}]
+                + history_dicts
+                + [{"role": "user", "content": question}]
             )
-            question = call_llm(rewrite_msgs, model)
+            standalone_question = call_llm(rewrite_messages, model)
 
-        # Step 2: retrieve docs
-        context = format_docs(retrieve(question))
+        # 3️⃣ Retrieve relevant context using the standalone question
+        context = format_docs(retrieve(standalone_question))
 
-        # Step 3: build answer
-        answer_msgs = (
-            [SystemMessage(content=(
-                "You are an expert assistant with deep knowledge of movies and TV shows.\n"
-                "You are given content retrieved from a Netflix dataset.\n\n"
-                "Rules:\n"
-                "- For recommendations: prioritize titles with compelling descriptions.\n"
-                "- Always explain WHY each title is worth watching in 1 sentence.\n"
-                "- For specific lookups: answer directly and precisely.\n"
-                "- For counting questions: clarify you only see partial data.\n"
-            ))]
-            + list(chat_history)
-            + [HumanMessage(content=f"Content:\n{context}\n\nQuestion: {question}")]
+        # 4️⃣ Build final answer — inject full history for contextual awareness
+        answer_messages = (
+            [{"role": "system", "content": ANSWER_SYSTEM}]
+            + history_dicts
+            + [{
+                "role": "user",
+                "content": (
+                    f"Retrieved content:\n{context}\n\n"
+                    f"Question: {standalone_question}"
+                )
+            }]
         )
-        return call_llm(answer_msgs, model)
+        return call_llm(answer_messages, model)
 
     return run_chain, len(chunks)
 
@@ -259,7 +314,7 @@ with st.sidebar:
             "arcee-ai/trinity-large-preview:free",
             "deepseek/deepseek-r1-0528:free",
             "nvidia/nemotron-3-nano-30b-a3b:free",
-            "openai/gpt-4o-mini"
+            "openai/gpt-4o-mini",
         ],
         index=0,
     )
@@ -268,7 +323,6 @@ with st.sidebar:
         "<p style='color:#38bdf8; font-size:0.75rem'>🔷 Embeddings: all-MiniLM-L6-v2</p>",
         unsafe_allow_html=True,
     )
-
     st.markdown("---")
     st.markdown("### 📂 Add Source")
 
@@ -374,6 +428,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+
 # ── Main chat area ───────────────────────────
 st.markdown("""
 <div class="app-header">
@@ -418,19 +473,26 @@ else:
 
     if send and user_input.strip():
         question = user_input.strip()
+
+        # Append user message to display + history (stored as dicts)
         st.session_state.messages.append({"role": "user", "content": question})
 
         with st.spinner("Thinking..."):
             try:
-                # Plain Python call — no LangChain invoke, no dict, no validation
+                # chat_history is a list of dicts — run_chain handles it natively
                 answer = st.session_state.chain(
                     question,
-                    st.session_state.chat_history
+                    st.session_state.chat_history   # list of {"role":..., "content":...}
                 )
+
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-                st.session_state.chat_history.append(HumanMessage(content=question))
-                st.session_state.chat_history.append(AIMessage(content=answer))
-                st.session_state.chat_history = st.session_state.chat_history[-10:]
+
+                # Store history as plain dicts — works with normalize_history()
+                st.session_state.chat_history.append({"role": "user",      "content": question})
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+                # Keep last 20 entries (10 full turns)
+                st.session_state.chat_history = st.session_state.chat_history[-20:]
 
             except Exception as e:
                 st.session_state.messages.append(
